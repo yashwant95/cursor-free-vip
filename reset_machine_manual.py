@@ -47,7 +47,7 @@ def get_cursor_paths(translator=None) -> Tuple[str, str]:
     # Default paths for different systems
     default_paths = {
         "Darwin": "/Applications/Cursor.app/Contents/Resources/app",
-        "Windows": os.path.join(os.getenv("LOCALAPPDATA", ""), "Programs", "Cursor", "resources", "app"),
+        "Windows": r"C:\Program Files\cursor\resources\app",
         "Linux": ["/opt/Cursor/resources/app", "/usr/share/cursor/resources/app", os.path.expanduser("~/.local/share/cursor/resources/app"), "/usr/lib/cursor/app/"]
     }
     
@@ -220,7 +220,25 @@ def get_workbench_cursor_path(translator=None) -> str:
                 return main_path
 
     if system == "Windows":
-        base_path = config.get('WindowsPaths', 'cursor_path')
+        # Check if path exists in config
+        if config.has_section('WindowsPaths') and config.has_option('WindowsPaths', 'cursor_path'):
+            base_path = config.get('WindowsPaths', 'cursor_path')
+            # Verify the path exists
+            if not os.path.exists(base_path):
+                # Fall back to correct path
+                base_path = r"C:\Program Files\cursor\resources\app"
+        else:
+            # Use correct path
+            base_path = r"C:\Program Files\cursor\resources\app"
+        
+        # Update config with correct path
+        if not config.has_section('WindowsPaths'):
+            config.add_section('WindowsPaths')
+        config.set('WindowsPaths', 'cursor_path', base_path)
+        
+        # Save config
+        with open(config_file, 'w', encoding='utf-8') as f:
+            config.write(f)
     elif system == "Darwin":
         base_path = paths_map[system]["base"]
     else:  # Linux
@@ -750,10 +768,19 @@ class MachineIDResetter:
             # Update system IDs
             self.update_system_ids(new_ids)
 
-
-            # Modify workbench.desktop.main.js
-            workbench_path = get_workbench_cursor_path(self.translator)
-            modify_workbench_js(workbench_path, self.translator)
+            # ===== FIX: Hardcode the correct path =====
+            print(f"{Fore.CYAN}{EMOJI['INFO']} Modifying workbench.desktop.main.js...{Style.RESET_ALL}")
+            
+            # Direct hardcoded path - this works!
+            workbench_path = r"C:\Program Files\cursor\resources\app\out\vs\workbench\workbench.desktop.main.js"
+            
+            if os.path.exists(workbench_path):
+                print(f"{Fore.GREEN}✓ Found workbench file at: {workbench_path}{Style.RESET_ALL}")
+                modify_workbench_js(workbench_path, self.translator)
+            else:
+                print(f"{Fore.RED}✗ Workbench file NOT found at: {workbench_path}{Style.RESET_ALL}")
+                print(f"{Fore.YELLOW}⚠️ Skipping workbench modification (non-critical){Style.RESET_ALL}")
+            # ===== END FIX =====
 
             # Check Cursor version and perform corresponding actions
             

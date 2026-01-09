@@ -27,21 +27,26 @@ def get_workbench_cursor_path(translator=None) -> str:
     """Get Cursor workbench.desktop.main.js path"""
     system = platform.system()
 
-    # Read configuration
-    config_dir = os.path.join(get_user_documents_path(), ".cursor-free-vip")
-    config_file = os.path.join(config_dir, "config.ini")
-    config = configparser.ConfigParser()
-
-    if os.path.exists(config_file):
-        config.read(config_file)
+    # YOUR SPECIFIC PATH - UPDATE THIS
+    if system == "Windows":
+        # Your actual Cursor installation path
+        workbench_path = r"C:\Program Files\cursor\resources\app\out\vs\workbench\workbench.desktop.main.js"
+        
+        if os.path.exists(workbench_path):
+            return workbench_path
+        else:
+            # Try alternative
+            alt_path = r"C:\Program Files\Cursor\resources\app\out\vs\workbench\workbench.desktop.main.js"
+            if os.path.exists(alt_path):
+                return alt_path
+            else:
+                raise OSError(f"Cursor not found at: {workbench_path}")
     
+    # Keep the rest of the function for other OS
     paths_map = {
         "Darwin": {  # macOS
             "base": "/Applications/Cursor.app/Contents/Resources/app",
             "main": "out/vs/workbench/workbench.desktop.main.js"
-        },
-        "Windows": {
-            "main": "out\\vs\\workbench\\workbench.desktop.main.js"
         },
         "Linux": {
             "bases": ["/opt/Cursor/resources/app", "/usr/share/cursor/resources/app", "/usr/lib/cursor/app/"],
@@ -64,15 +69,12 @@ def get_workbench_cursor_path(translator=None) -> str:
             print(f"{Fore.CYAN}{EMOJI['INFO']} Checking path: {main_path}{Style.RESET_ALL}")
             if os.path.exists(main_path):
                 return main_path
-
-    if system == "Windows":
-        base_path = config.get('WindowsPaths', 'cursor_path')
+        # If we're here, it means none of the bases worked, so we'll use the first one
+        base_path = paths_map["Linux"]["bases"][0]
     elif system == "Darwin":
         base_path = paths_map[system]["base"]
-    else:  # Linux
-        # For Linux, we've already checked all bases in the loop above
-        # If we're here, it means none of the bases worked, so we'll use the first one
-        base_path = paths_map[system]["bases"][0]
+    else:
+        raise OSError(translator.get('reset.unsupported_os', system=system) if translator else f"不支持的操作系统: {system}")
 
     main_path = os.path.join(base_path, paths_map[system]["main"])
     

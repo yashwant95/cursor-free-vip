@@ -1,6 +1,8 @@
 import sqlite3
 import os
 import sys
+import json
+import time
 from colorama import Fore, Style, init
 from config import get_config
 
@@ -16,12 +18,16 @@ EMOJI = {
     'WARN': '⚠️',
     'INFO': 'ℹ️',
     'FILE': '📄',
-    'KEY': '🔐'
+    'KEY': '🔐',
+    'ACCOUNT': '👤',
+    'SWITCH': '🔀'
 }
 
 class CursorAuth:
     def __init__(self, translator=None):
         self.translator = translator
+        self.current_account = None
+        self.accounts_file = "cursor_accounts_data.json"
         
         # Get configuration
         config = get_config(translator)
@@ -60,22 +66,36 @@ class CursorAuth:
 
         # Check if the database file exists
         if not os.path.exists(self.db_path):
-            print(f"{Fore.RED}{EMOJI['ERROR']} {self.translator.get('auth.db_not_found', path=self.db_path)}{Style.RESET_ALL}")
-            return
+            print(f"{Fore.YELLOW}{EMOJI['WARN']} {self.translator.get('auth.db_not_found', path=self.db_path) if self.translator else f'Database not found, will create: {self.db_path}'}{Style.RESET_ALL}")
 
-        # Check file permissions
-        if not os.access(self.db_path, os.R_OK | os.W_OK):
-            print(f"{Fore.RED}{EMOJI['ERROR']} {self.translator.get('auth.db_permission_error')}{Style.RESET_ALL}")
-            return
+        # Load existing accounts
+        self.load_accounts()
 
+    def load_accounts(self):
+        """Load all saved accounts from file"""
+        if os.path.exists(self.accounts_file):
+            try:
+                with open(self.accounts_file, 'r') as f:
+                    self.accounts = json.load(f)
+                print(f"{Fore.GREEN}{EMOJI['SUCCESS']} Loaded {len(self.accounts)} accounts{Style.RESET_ALL}")
+            except Exception as e:
+                print(f"{Fore.YELLOW}{EMOJI['WARN']} Error loading accounts: {e}, creating new...{Style.RESET_ALL}")
+                self.accounts = {}
+        else:
+            self.accounts = {}
+            print(f"{Fore.CYAN}{EMOJI['INFO']} No accounts file found, starting fresh{Style.RESET_ALL}")
+
+    def save_accounts(self):
+        """Save all accounts to file"""
         try:
-            self.conn = sqlite3.connect(self.db_path)
-            print(f"{Fore.GREEN}{EMOJI['SUCCESS']} {self.translator.get('auth.connected_to_database')}{Style.RESET_ALL}")
-        except sqlite3.Error as e:
-            print(f"{Fore.RED}{EMOJI['ERROR']} {self.translator.get('auth.db_connection_error', error=str(e))}{Style.RESET_ALL}")
-            return
+            with open(self.accounts_file, 'w') as f:
+                json.dump(self.accounts, f, indent=2)
+            print(f"{Fore.GREEN}{EMOJI['SUCCESS']} Saved {len(self.accounts)} accounts{Style.RESET_ALL}")
+        except Exception as e:
+            print(f"{Fore.RED}{EMOJI['ERROR']} Error saving accounts: {e}{Style.RESET_ALL}")
 
-    def update_auth(self, email=None, access_token=None, refresh_token=None):
+    def update_auth(self, email=None, access_token=None, refresh_token=None, account_name=None):
+        """Update authentication for specific account"""
         conn = None
         try:
             # Ensure the directory exists and set the correct permissions
@@ -100,7 +120,7 @@ class CursorAuth:
 
             # Reconnect to the database
             conn = sqlite3.connect(self.db_path)
-            print(f"{EMOJI['INFO']} {Fore.GREEN} {self.translator.get('auth.connected_to_database')}{Style.RESET_ALL}")
+            print(f"{EMOJI['INFO']} {Fore.GREEN} {self.translator.get('auth.connected_to_database') if self.translator else 'Connected to Database'}{Style.RESET_ALL}")
             cursor = conn.cursor()
             
             # Add timeout and other optimization settings
@@ -108,9 +128,25 @@ class CursorAuth:
             conn.execute("PRAGMA journal_mode = WAL")
             conn.execute("PRAGMA synchronous = NORMAL")
             
-            # Set the key-value pairs to update
-            updates = []
+            # If account_name is provided, use it as identifier
+            account_id = account_name if account_name else email
+            
+            # Save account data
+            if email and access_token:
+                self.accounts[account_id] = {
+                    "email": email,
+                    "access_token": access_token,
+                    "refresh_token": refresh_token if refresh_token else access_token,
+                    "created": time.strftime("%Y-%m-%d %H:%M:%S"),
+                    "last_used": time.strftime("%Y-%m-%d %H:%M:%S"),
+                    "usage": 0
+                }
+                self.save_accounts()
+                self.current_account = account_id
+                print(f"{Fore.GREEN}{EMOJI['ACCOUNT']} Account saved: {account_id}{Style.RESET_ALL}")
 
+            # Set the key-value pairs to update in Cursor database
+            updates = []
             updates.append(("cursorAuth/cachedSignUpType", "Auth_0"))
 
             if email is not None:
@@ -119,7 +155,6 @@ class CursorAuth:
                 updates.append(("cursorAuth/accessToken", access_token))
             if refresh_token is not None:
                 updates.append(("cursorAuth/refreshToken", refresh_token))
-                
 
             # Use transactions to ensure data integrity
             cursor.execute("BEGIN TRANSACTION")
@@ -137,10 +172,10 @@ class CursorAuth:
                             UPDATE ItemTable SET value = ?
                             WHERE key = ?
                         """, (value, key))
-                    print(f"{EMOJI['INFO']} {Fore.CYAN} {self.translator.get('auth.updating_pair')} {key.split('/')[-1]}...{Style.RESET_ALL}")
+                    print(f"{EMOJI['INFO']} {Fore.CYAN} {self.translator.get('auth.updating_pair') if self.translator else 'Updating Key-Value Pair'} {key.split('/')[-1]}...{Style.RESET_ALL}")
                 
                 cursor.execute("COMMIT")
-                print(f"{EMOJI['SUCCESS']} {Fore.GREEN}{self.translator.get('auth.database_updated_successfully')}{Style.RESET_ALL}")
+                print(f"{EMOJI['SUCCESS']} {Fore.GREEN}{self.translator.get('auth.database_updated_successfully') if self.translator else 'Database Updated Successfully'}{Style.RESET_ALL}")
                 return True
                 
             except Exception as e:
@@ -148,12 +183,104 @@ class CursorAuth:
                 raise e
 
         except sqlite3.Error as e:
-            print(f"\n{EMOJI['ERROR']} {Fore.RED} {self.translator.get('auth.database_error', error=str(e))}{Style.RESET_ALL}")
+            print(f"\n{EMOJI['ERROR']} {Fore.RED} {self.translator.get('auth.database_error', error=str(e)) if self.translator else f'Database Error: {str(e)}'}{Style.RESET_ALL}")
             return False
         except Exception as e:
-            print(f"\n{EMOJI['ERROR']} {Fore.RED} {self.translator.get('auth.an_error_occurred', error=str(e))}{Style.RESET_ALL}")
+            print(f"\n{EMOJI['ERROR']} {Fore.RED} {self.translator.get('auth.an_error_occurred', error=str(e)) if self.translator else f'An error occurred: {str(e)}'}{Style.RESET_ALL}")
             return False
         finally:
             if conn:
                 conn.close()
-                print(f"{EMOJI['DB']} {Fore.CYAN} {self.translator.get('auth.database_connection_closed')}{Style.RESET_ALL}")
+                print(f"{EMOJI['DB']} {Fore.CYAN} {self.translator.get('auth.database_connection_closed') if self.translator else 'Database Connection Closed'}{Style.RESET_ALL}")
+
+    def switch_account(self, account_id):
+        """Switch to a different saved account"""
+        if account_id not in self.accounts:
+            print(f"{Fore.RED}{EMOJI['ERROR']} Account not found: {account_id}{Style.RESET_ALL}")
+            return False
+        
+        account = self.accounts[account_id]
+        
+        # Close Cursor if running
+        if sys.platform == "win32":
+            os.system('taskkill /f /im cursor.exe 2>nul')
+        
+        print(f"{Fore.CYAN}{EMOJI['SWITCH']} Switching to account: {account_id}{Style.RESET_ALL}")
+        
+        # Update Cursor database with this account's tokens
+        success = self.update_auth(
+            email=account["email"],
+            access_token=account["access_token"],
+            refresh_token=account["refresh_token"],
+            account_name=account_id
+        )
+        
+        if success:
+            self.current_account = account_id
+            account["last_used"] = time.strftime("%Y-%m-%d %H:%M:%S")
+            self.save_accounts()
+            print(f"{Fore.GREEN}{EMOJI['SUCCESS']} Switched to account: {account_id}{Style.RESET_ALL}")
+            print(f"{Fore.CYAN}{EMOJI['INFO']} Open Cursor to use this account{Style.RESET_ALL}")
+        
+        return success
+
+    def list_accounts(self):
+        """List all saved accounts"""
+        if not self.accounts:
+            print(f"{Fore.YELLOW}{EMOJI['WARN']} No accounts saved{Style.RESET_ALL}")
+            return
+        
+        print(f"{Fore.CYAN}{EMOJI['ACCOUNT']} Saved Accounts ({len(self.accounts)}):{Style.RESET_ALL}")
+        print("-" * 60)
+        
+        for i, (account_id, data) in enumerate(self.accounts.items(), 1):
+            current = " ⭐" if account_id == self.current_account else ""
+            print(f"{i}. {account_id}{current}")
+            print(f"   Email: {data['email']}")
+            print(f"   Created: {data['created']}")
+            print(f"   Last used: {data['last_used']}")
+            print(f"   Usage: {data['usage']:,} tokens")
+            print()
+
+    def delete_account(self, account_id):
+        """Delete a saved account"""
+        if account_id not in self.accounts:
+            print(f"{Fore.RED}{EMOJI['ERROR']} Account not found: {account_id}{Style.RESET_ALL}")
+            return False
+        
+        del self.accounts[account_id]
+        self.save_accounts()
+        
+        if self.current_account == account_id:
+            self.current_account = None
+        
+        print(f"{Fore.GREEN}{EMOJI['SUCCESS']} Deleted account: {account_id}{Style.RESET_ALL}")
+        return True
+
+    def update_usage(self, account_id, tokens_used):
+        """Update token usage for an account"""
+        if account_id in self.accounts:
+            self.accounts[account_id]["usage"] += tokens_used
+            self.save_accounts()
+            print(f"{Fore.CYAN}{EMOJI['INFO']} Updated usage for {account_id}: {self.accounts[account_id]['usage']:,} tokens{Style.RESET_ALL}")
+
+    def get_lowest_usage_account(self):
+        """Get account with lowest token usage"""
+        if not self.accounts:
+            return None
+        
+        # Sort by usage (lowest first)
+        sorted_accounts = sorted(self.accounts.items(), key=lambda x: x[1]["usage"])
+        return sorted_accounts[0][0]  # Return account_id
+
+    def auto_switch(self):
+        """Automatically switch to account with lowest usage"""
+        if not self.accounts:
+            print(f"{Fore.YELLOW}{EMOJI['WARN']} No accounts available{Style.RESET_ALL}")
+            return False
+        
+        account_id = self.get_lowest_usage_account()
+        if account_id:
+            return self.switch_account(account_id)
+        
+        return False

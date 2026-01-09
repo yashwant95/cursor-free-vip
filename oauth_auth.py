@@ -5,6 +5,8 @@ import random
 import webbrowser
 import sys
 import json
+import socket
+import subprocess
 from DrissionPage import ChromiumPage, ChromiumOptions
 from cursor_auth import CursorAuth
 from utils import get_random_wait_time, get_default_chrome_path
@@ -33,7 +35,46 @@ class OAuthHandler:
         os.environ['BROWSER_HEADLESS'] = 'False'
         self.browser = None
         self.selected_profile = None
+        self.debug_port = 9222
         
+    def _is_port_in_use(self, port):
+        """Check if a port is already in use"""
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(1)
+            result = s.connect_ex(('127.0.0.1', port))
+            return result == 0
+    
+    def _find_available_port(self, start_port=9222, max_attempts=10):
+        """Find an available port starting from start_port"""
+        for offset in range(max_attempts):
+            port = start_port + offset
+            if not self._is_port_in_use(port):
+                print(f"{Fore.GREEN}{EMOJI['SUCCESS']} Found available port: {port}{Style.RESET_ALL}")
+                return port
+        return None
+    
+    def _cleanup_chrome_locks(self, user_data_dir, active_profile):
+        """Remove Chrome lock files that might prevent connection"""
+        try:
+            profile_path = os.path.join(user_data_dir, active_profile)
+            lock_files = [
+                os.path.join(profile_path, 'SingletonLock'),
+                os.path.join(profile_path, 'DevToolsActivePort'),
+                os.path.join(user_data_dir, 'SingletonLock'),
+                os.path.join(user_data_dir, 'DevToolsActivePort')
+            ]
+            
+            for lock_file in lock_files:
+                if os.path.exists(lock_file):
+                    try:
+                        os.remove(lock_file)
+                        print(f"{Fore.YELLOW}{EMOJI['INFO']} Removed lock file: {lock_file}{Style.RESET_ALL}")
+                    except Exception as e:
+                        print(f"{Fore.YELLOW}{EMOJI['WARNING']} Could not remove {lock_file}: {e}{Style.RESET_ALL}")
+        except Exception as e:
+            print(f"{Fore.YELLOW}{EMOJI['WARNING']} Error cleaning up Chrome locks: {e}{Style.RESET_ALL}")
+        
+
     def _get_available_profiles(self, user_data_dir):
         """Get list of available Chrome profiles with their names"""
         try:
@@ -99,77 +140,151 @@ class OAuthHandler:
             return False
         
     def setup_browser(self):
-        """Setup browser for OAuth flow using selected profile"""
-        try:
-            print(f"{Fore.CYAN}{EMOJI['INFO']} {self.translator.get('oauth.initializing_browser_setup') if self.translator else 'Initializing browser setup...'}{Style.RESET_ALL}")
-            
-            # Platform-specific initialization
-            platform_name = platform.system().lower()
-            print(f"{Fore.CYAN}{EMOJI['INFO']} {self.translator.get('oauth.detected_platform', platform=platform_name) if self.translator else f'Detected platform: {platform_name}'}{Style.RESET_ALL}")
-            
-            # Get browser paths and user data directory
-            user_data_dir = self._get_user_data_directory()
-            chrome_path = self._get_browser_path()
-            
-            if not chrome_path:
-                raise Exception(f"{self.translator.get('oauth.no_compatible_browser_found') if self.translator else 'No compatible browser found. Please install Google Chrome or Chromium.'}\n{self.translator.get('oauth.supported_browsers', platform=platform_name)}\n" + 
-                              "- Windows: Google Chrome, Chromium\n" +
-                              "- macOS: Google Chrome, Chromium\n" +
-                              "- Linux: Google Chrome, Chromium, chromium-browser")
-            
-            print(f"{Fore.CYAN}{EMOJI['INFO']} {self.translator.get('oauth.found_browser_data_directory', path=user_data_dir) if self.translator else f'Found browser data directory: {user_data_dir}'}{Style.RESET_ALL}")
-            
-            # Show warning about closing Chrome first
-            print(f"\n{Fore.YELLOW}{EMOJI['WARNING']} {self.translator.get('chrome_profile.warning_chrome_close') if self.translator else 'Warning: This will close all running Chrome processes'}{Style.RESET_ALL}")
-            choice = input(f"{Fore.YELLOW} {self.translator.get('menu.continue_prompt', choices='y/N')} {Style.RESET_ALL}").lower()
-            if choice != 'y':
-                print(f"{Fore.YELLOW}{EMOJI['INFO']} {self.translator.get('menu.operation_cancelled_by_user') if self.translator else 'Operation cancelled by user'}{Style.RESET_ALL}")
-                return False
+        """Setup browser for OAuth flow using selected profile with retry logic"""
+        max_retries = 3
+        retry_count = 0
+        profile_selected = False  # Track if we've already selected a profile
+        user_data_dir = None
+        chrome_path = None
+        
+        while retry_count < max_retries:
+            try:
+                if retry_count == 0:
+                    # First attempt only: initialize and get paths
+                    print(f"{Fore.CYAN}{EMOJI['INFO']} {self.translator.get('oauth.initializing_browser_setup') if self.translator else 'Initializing browser setup...'}{Style.RESET_ALL}")
+                    
+                    # Platform-specific initialization
+                    platform_name = platform.system().lower()
+                    print(f"{Fore.CYAN}{EMOJI['INFO']} {self.translator.get('oauth.detected_platform', platform=platform_name) if self.translator else f'Detected platform: {platform_name}'}{Style.RESET_ALL}")
+                    
+                    # Get browser paths and user data directory
+                    user_data_dir = self._get_user_data_directory()
+                    chrome_path = self._get_browser_path()
+                    
+                    if not chrome_path:
+                        raise Exception(f"{self.translator.get('oauth.no_compatible_browser_found') if self.translator else 'No compatible browser found. Please install Google Chrome or Chromium.'}\n{self.translator.get('oauth.supported_browsers', platform=platform_name)}\n" + 
+                                      "- Windows: Google Chrome, Chromium\n" +
+                                      "- macOS: Google Chrome, Chromium\n" +
+                                      "- Linux: Google Chrome, Chromium, chromium-browser")
+                    
+                    print(f"{Fore.CYAN}{EMOJI['INFO']} {self.translator.get('oauth.found_browser_data_directory', path=user_data_dir) if self.translator else f'Found browser data directory: {user_data_dir}'}{Style.RESET_ALL}")
+                    
+                    # Show warning about closing Chrome first
+                    print(f"\n{Fore.YELLOW}{EMOJI['WARNING']} {self.translator.get('chrome_profile.warning_chrome_close') if self.translator else 'Warning: This will close all running Chrome processes'}{Style.RESET_ALL}")
+                    choice = input(f"{Fore.YELLOW} {self.translator.get('menu.continue_prompt', choices='y/N')} {Style.RESET_ALL}").lower()
+                    if choice != 'y':
+                        print(f"{Fore.YELLOW}{EMOJI['INFO']} {self.translator.get('menu.operation_cancelled_by_user') if self.translator else 'Operation cancelled by user'}{Style.RESET_ALL}")
+                        return False
 
-            # Kill existing browser processes
-            self._kill_browser_processes()
-            
-            # Let user select a profile
-            if not self._select_profile():
-                print(f"{Fore.YELLOW}{EMOJI['INFO']} {self.translator.get('menu.operation_cancelled_by_user') if self.translator else 'Operation cancelled by user'}{Style.RESET_ALL}")
-                return False
-            
-            # Configure browser options
-            co = self._configure_browser_options(chrome_path, user_data_dir, self.selected_profile)
-            
-            print(f"{Fore.CYAN}{EMOJI['INFO']} {self.translator.get('oauth.starting_browser', path=chrome_path) if self.translator else f'Starting browser at: {chrome_path}'}{Style.RESET_ALL}")
-            self.browser = ChromiumPage(co)
-            
-            # Verify browser launched successfully
-            if not self.browser:
-                raise Exception(f"{self.translator.get('oauth.browser_failed_to_start') if self.translator else 'Failed to initialize browser instance'}")
-            
-            print(f"{Fore.GREEN}{EMOJI['SUCCESS']} {self.translator.get('oauth.browser_setup_completed') if self.translator else 'Browser setup completed successfully'}{Style.RESET_ALL}")
-            return True
-            
-        except Exception as e:
-            print(f"{Fore.RED}{EMOJI['ERROR']} {self.translator.get('oauth.browser_setup_failed', error=str(e)) if self.translator else f'Browser setup failed: {str(e)}'}{Style.RESET_ALL}")
-            if "DevToolsActivePort file doesn't exist" in str(e):
-                print(f"{Fore.YELLOW}{EMOJI['INFO']} {self.translator.get('oauth.try_running_without_sudo_admin') if self.translator else 'Try running without sudo/administrator privileges'}{Style.RESET_ALL}")
-            elif "Chrome failed to start" in str(e):
-                print(f"{Fore.YELLOW}{EMOJI['INFO']} {self.translator.get('oauth.make_sure_chrome_chromium_is_properly_installed') if self.translator else 'Make sure Chrome/Chromium is properly installed'}{Style.RESET_ALL}")
-                if platform_name == 'linux':
-                    print(f"{Fore.YELLOW}{EMOJI['INFO']} {self.translator.get('oauth.try_install_chromium') if self.translator else 'Try: sudo apt install chromium-browser'}{Style.RESET_ALL}")
-            return False
+                    # Kill existing browser processes
+                    self._kill_browser_processes()
+                    time.sleep(1)
+                    
+                    # Let user select a profile (only once)
+                    if not profile_selected:
+                        if not self._select_profile():
+                            print(f"{Fore.YELLOW}{EMOJI['INFO']} {self.translator.get('menu.operation_cancelled_by_user') if self.translator else 'Operation cancelled by user'}{Style.RESET_ALL}")
+                            return False
+                        profile_selected = True
+                
+                # On retries, don't re-select profile or re-ask user - just try again
+                if retry_count > 0:
+                    print(f"{Fore.YELLOW}{EMOJI['WARNING']} {self.translator.get('menu.retrying') if self.translator else f'Retry attempt {retry_count}/{max_retries}'}{Style.RESET_ALL}")
+                    # Longer wait between retries
+                    print(f"{Fore.CYAN}{EMOJI['INFO']} Waiting 3 seconds before retry...{Style.RESET_ALL}")
+                    time.sleep(3)
+                
+                # Check and manage debug port
+                if self._is_port_in_use(self.debug_port):
+                    print(f"{Fore.YELLOW}{EMOJI['WARNING']} Debug port {self.debug_port} is in use, finding alternative...{Style.RESET_ALL}")
+                    available_port = self._find_available_port(self.debug_port)
+                    if available_port:
+                        self.debug_port = available_port
+                        print(f"{Fore.CYAN}{EMOJI['INFO']} Using debug port: {self.debug_port}{Style.RESET_ALL}")
+                    else:
+                        # Force kill any chrome processes using the port
+                        self._kill_browser_processes()
+                        time.sleep(2)
+                        self.debug_port = 9222
+                
+                # Configure browser options
+                co = self._configure_browser_options(chrome_path, user_data_dir, self.selected_profile)
+                
+                # CRITICAL: Kill processes and clean locks BEFORE launching browser
+                self._kill_browser_processes()
+                time.sleep(2)
+                self._cleanup_chrome_locks(user_data_dir, self.selected_profile)
+                time.sleep(1)
+                
+                # Debug information
+                print(f"{Fore.CYAN}DEBUG PORT: {self.debug_port}{Style.RESET_ALL}")
+                print(f"{Fore.CYAN}USER DATA: {user_data_dir}{Style.RESET_ALL}")
+                print(f"{Fore.CYAN}PROFILE: {self.selected_profile}{Style.RESET_ALL}")
+                
+                print(f"{Fore.CYAN}{EMOJI['INFO']} {self.translator.get('oauth.starting_browser', path=chrome_path) if self.translator else f'Starting browser at: {chrome_path}'}{Style.RESET_ALL}")
+                
+                # Try to create the browser instance
+                try:
+                    self.browser = ChromiumPage(co)
+                except Exception as e:
+                    error_str = str(e).lower()
+                    
+                    # Check if it's a connection/port error
+                    if any(keyword in error_str for keyword in ['connection', 'devtoolsactiveport', 'bind', 'address', 'port']):
+                        retry_count += 1
+                        if retry_count < max_retries:
+                            print(f"{Fore.YELLOW}{EMOJI['WARNING']} {self.translator.get('oauth.browser_connection_failed_retrying', attempt=retry_count, max=max_retries) if self.translator else f'Browser connection failed (attempt {retry_count}/{max_retries}), retrying...'}{Style.RESET_ALL}")
+                            continue
+                    
+                    raise e
+                
+                # Verify browser launched successfully
+                if not self.browser:
+                    raise Exception(f"{self.translator.get('oauth.browser_failed_to_start') if self.translator else 'Failed to initialize browser instance'}")
+                
+                print(f"{Fore.GREEN}{EMOJI['SUCCESS']} {self.translator.get('oauth.browser_setup_completed') if self.translator else 'Browser setup completed successfully'}{Style.RESET_ALL}")
+                return True
+                
+            except Exception as e:
+                print(f"{Fore.RED}{EMOJI['ERROR']} {self.translator.get('oauth.browser_setup_failed', error=str(e)) if self.translator else f'Browser setup failed: {str(e)}'}{Style.RESET_ALL}")
+                
+                error_str = str(e).lower()
+                if "devtoolsactiveport" in error_str:
+                    print(f"{Fore.YELLOW}{EMOJI['INFO']} Tip: DevTools port lock detected - Chrome may not have fully closed.{Style.RESET_ALL}")
+                elif "chrome failed to start" in error_str:
+                    print(f"{Fore.YELLOW}{EMOJI['INFO']} {self.translator.get('oauth.make_sure_chrome_chromium_is_properly_installed') if self.translator else 'Make sure Chrome/Chromium is properly installed'}{Style.RESET_ALL}")
+                elif "connection" in error_str or "address already in use" in error_str:
+                    print(f"{Fore.YELLOW}{EMOJI['INFO']} Tip: The debug port might be in use. Killing all Chrome processes...{Style.RESET_ALL}")
+                elif "sandbox" in error_str and platform_name == 'linux':
+                    print(f"{Fore.YELLOW}{EMOJI['INFO']} Tip: Add '--no-sandbox' parameter for headless environments{Style.RESET_ALL}")
+                
+                retry_count += 1
+                if retry_count >= max_retries:
+                    print(f"{Fore.RED}{EMOJI['ERROR']} {self.translator.get('oauth.failed_to_start_browser_after_attempts', attempts=max_retries) if self.translator else f'Failed to start browser after {max_retries} attempts'}{Style.RESET_ALL}")
+                    return False
+                
+                time.sleep(1)
+
+        return False
+
 
     def _kill_browser_processes(self):
-        """Kill existing browser processes based on platform"""
+        """Kill existing browser processes based on platform with multiple attempts"""
         try:
             if os.name == 'nt':  # Windows
-                processes = ['chrome.exe', 'chromium.exe']
-                for proc in processes:
-                    os.system(f'taskkill /f /im {proc} >nul 2>&1')
+                # Kill Chrome and related processes with /t flag (kill tree)
+                os.system('taskkill /f /im chrome.exe /t >nul 2>&1')
+                os.system('taskkill /f /im chromium.exe /t >nul 2>&1')
+                os.system('taskkill /f /im chromedriver.exe /t >nul 2>&1')
+                os.system('taskkill /f /im msedge.exe /t >nul 2>&1')
+                time.sleep(1)
             else:  # Linux/Mac
                 processes = ['chrome', 'chromium', 'chromium-browser']
                 for proc in processes:
-                    os.system(f'pkill -f {proc} >/dev/null 2>&1')
+                    os.system(f'pkill -9 {proc} >/dev/null 2>&1')
             
-            time.sleep(1)  # Wait for processes to close
+            # Wait longer for processes to fully terminate
+            time.sleep(2)
         except Exception as e:
             print(f"{Fore.YELLOW}{EMOJI['INFO']} {self.translator.get('oauth.warning_could_not_kill_existing_browser_processes', error=str(e)) if self.translator else f'Warning: Could not kill existing browser processes: {e}'}{Style.RESET_ALL}")
 
@@ -259,27 +374,47 @@ class OAuthHandler:
             return None
 
     def _configure_browser_options(self, chrome_path, user_data_dir, active_profile):
-        """Configure browser options based on platform"""
+        """Configure browser options based on platform with enhanced error handling"""
         try:
             co = ChromiumOptions()
             co.set_paths(browser_path=chrome_path, user_data_path=user_data_dir)
             co.set_argument(f'--profile-directory={active_profile}')
             
-            # Basic options
+            # CRITICAL: Remote debugging configuration for DrissionPage
+            co.auto_port(True)
+
+              
+            # Basic options for stability
             co.set_argument('--no-first-run')
             co.set_argument('--no-default-browser-check')
             co.set_argument('--disable-gpu')
+            co.set_argument('--disable-background-networking')
+            co.set_argument('--disable-background-timer-throttling')
+            co.set_argument('--disable-backgrounding-occluded-windows')
+            co.set_argument('--disable-breakpad')
+            co.set_argument('--disable-client-side-phishing-detection')
+            co.set_argument('--disable-sync')
+            co.set_argument('--disable-extensions')
+            co.set_argument('--disable-default-apps')
+            co.set_argument('--disable-preconnect')
+            co.set_argument('--disable-component-extensions-with-background-pages')
             
             # Platform-specific options
             if sys.platform.startswith('linux'):
                 co.set_argument('--no-sandbox')
                 co.set_argument('--disable-dev-shm-usage')
                 co.set_argument('--disable-setuid-sandbox')
+                co.set_argument('--disable-seccomp-filter-sandbox')
             elif sys.platform == 'darwin':
                 co.set_argument('--disable-gpu-compositing')
+                # macOS specific options to prevent resource issues
+                co.set_argument('--disable-web-resources')
             elif os.name == 'nt':
                 co.set_argument('--disable-features=TranslateUI')
                 co.set_argument('--disable-features=RendererCodeIntegrity')
+                # Windows specific options
+                co.set_argument('--no-first-run')
+                co.set_argument('--no-service-autorun')
             
             return co
             
@@ -301,26 +436,39 @@ class OAuthHandler:
             try:
                 print(f"{Fore.CYAN}{EMOJI['INFO']} {self.translator.get('oauth.navigating_to_authentication_page') if self.translator else 'Navigating to authentication page...'}{Style.RESET_ALL}")
                 self.browser.get("https://authenticator.cursor.sh/sign-up")
-                time.sleep(get_random_wait_time(self.config, 'page_load_wait'))
                 
-                # Look for Google auth button
+                
+                # UPDATED: Look for Google auth button using CORRECT selectors
+                # The page is in ENGLISH, so look for "Continue with Google" text
                 selectors = [
-                    "//a[contains(@href,'GoogleOAuth')]",
-                    "//a[contains(@class,'auth-method-button') and contains(@href,'GoogleOAuth')]",
-                    "(//a[contains(@class,'auth-method-button')])[1]"  # First auth button as fallback
+                    "//button[contains(text(), 'Continue with Google')]",  # Direct match for English
+                    "//button[contains(., 'Google')]",                     # Button containing Google
+                    "//a[contains(text(), 'Continue with Google')]",       # In case it's a link
+                    "//*[contains(text(), 'Continue with Google')]",       # Any element with this text
                 ]
                 
                 auth_btn = None
                 for selector in selectors:
                     try:
-                        auth_btn = self.browser.ele(f"xpath:{selector}", timeout=2)
+                        # Use a slightly longer timeout for page load
+                        auth_btn = self.browser.ele(f"xpath:{selector}", timeout=5)
                         if auth_btn and auth_btn.is_displayed():
+                            print(f"{Fore.GREEN}{EMOJI['SUCCESS']} Found button with selector: {selector}{Style.RESET_ALL}")
                             break
-                    except:
+                    except Exception as e:
+                        print(f"{Fore.YELLOW}{EMOJI['INFO']} Selector '{selector}' failed: {e}{Style.RESET_ALL}")
                         continue
-                
+
                 if not auth_btn:
-                    raise Exception("Could not find Google authentication button")
+                    # CRITICAL DEBUG: Take a screenshot to see what the page looks like
+                    print(f"{Fore.RED}{EMOJI['ERROR']} Could not find Google authentication button. Taking screenshot for debugging.{Style.RESET_ALL}")
+                    try:
+                        screenshot_path = os.path.join(os.getcwd(), 'oauth_debug_page.png')
+                        self.browser.get_screenshot(screenshot_path, full_page=True)
+                        print(f"{Fore.CYAN}{EMOJI['INFO']} Screenshot saved to: {screenshot_path}{Style.RESET_ALL}")
+                    except Exception as screenshot_error:
+                        print(f"{Fore.YELLOW}{EMOJI['INFO']} Could not take screenshot: {screenshot_error}{Style.RESET_ALL}")
+                    raise Exception("Could not find Google authentication button. Please check the selectors or inspect the saved screenshot.")
                 
                 # Click the button and wait for page load
                 print(f"{Fore.CYAN}{EMOJI['INFO']} {self.translator.get('oauth.starting_google_authentication') if self.translator else 'Starting Google authentication...'}{Style.RESET_ALL}")
@@ -350,12 +498,7 @@ class OAuthHandler:
             except Exception as e:
                 print(f"{Fore.RED}{EMOJI['ERROR']} {self.translator.get('oauth.authentication_error', error=str(e)) if self.translator else f'Authentication error: {str(e)}'}{Style.RESET_ALL}")
                 return False, None
-            finally:
-                try:
-                    if self.browser:
-                        self.browser.quit()
-                except:
-                    pass
+           
             
         except Exception as e:
             print(f"{Fore.RED}{EMOJI['ERROR']} {self.translator.get('oauth.failed', error=str(e))}{Style.RESET_ALL}")
@@ -424,7 +567,12 @@ class OAuthHandler:
                                             if self._delete_current_account():
                                                 print(f"{Fore.CYAN}{EMOJI['INFO']} {self.translator.get('oauth.starting_new_authentication_process') if self.translator else 'Starting new authentication process...'}{Style.RESET_ALL}")
                                                 if self.auth_type == "google":
-                                                    return self.handle_google_auth()
+                                                  return {
+    "email": email,
+    "token": token,
+    "usage_exceeded": True
+}
+
                                                 else:
                                                     return self.handle_github_auth()
                                             else:
@@ -827,12 +975,7 @@ class OAuthHandler:
             return False
 
 def main(auth_type, translator=None):
-    """Main function to handle OAuth authentication
-    
-    Args:
-        auth_type (str): Type of authentication ('google' or 'github')
-        translator: Translator instance for internationalization
-    """
+    """Main function to handle OAuth authentication"""
     handler = OAuthHandler(translator, auth_type)
     
     if auth_type.lower() == 'google':
@@ -848,18 +991,35 @@ def main(auth_type, translator=None):
     if success and auth_info:
         # Update Cursor authentication
         auth_manager = CursorAuth(translator)
+        
+        # Ask for account name
+        print(f"\n{Fore.CYAN}{EMOJI['INFO']} Save this as which account?{Style.RESET_ALL}")
+        print("  Enter account name (e.g., 'cursor1', 'work', 'personal'):")
+        account_name = input(f"{Fore.CYAN}  Account name: {Style.RESET_ALL}").strip()
+        
+        if not account_name:
+            # Use email as default
+            account_name = auth_info["email"].split('@')[0]
+        
         if auth_manager.update_auth(
             email=auth_info["email"],
             access_token=auth_info["token"],
-            refresh_token=auth_info["token"]
+            refresh_token=auth_info["token"],
+            account_name=account_name  # Pass account name
         ):
             print(f"{Fore.GREEN}{EMOJI['SUCCESS']} {translator.get('oauth.auth_update_success') if translator else 'Auth update success'}{Style.RESET_ALL}")
             # Close the browser after successful authentication
             if handler.browser:
                 handler.browser.quit()
                 print(f"{Fore.CYAN}{EMOJI['INFO']} {translator.get('oauth.browser_closed') if translator else 'Browser closed'}{Style.RESET_ALL}")
+            
+            # Show all accounts
+            auth_manager.list_accounts()
             return True
         else:
             print(f"{Fore.RED}{EMOJI['ERROR']} {translator.get('oauth.auth_update_failed') if translator else 'Auth update failed'}{Style.RESET_ALL}")
             
     return False 
+
+
+
